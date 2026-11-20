@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>共享词嵌入 SGD 对照校验</title>
+<title>共享词嵌入 SGD / 蒸馏对照校验</title>
 <style>
   :root {
     --bg: #0f1420; --panel: #182030; --panel-2: #1f293b; --line: #2c3a52;
@@ -30,6 +30,7 @@
     SFMono-Regular, Menlo, monospace;
   }
   textarea { min-height: 118px; resize: vertical; }
+  textarea.ds-listed { min-height: 86px; }
   button { cursor: pointer; border: 1px solid var(--line); border-radius: 7px;
            background: var(--panel-2); color: var(--text); padding: 8px 12px;
            font-size: 13px; }
@@ -37,11 +38,15 @@
   button.primary { background: var(--accent); color: #07111f; border-color: var(--accent);
                    font-weight: 700; }
   button.primary:disabled { opacity: .55; cursor: progress; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 4px; }
+  .tab { flex: 1; font-weight: 600; }
+  .tab.active { background: var(--accent); color: #07111f; border-color: var(--accent); }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .mb { border: 1px dashed var(--line); border-radius: 8px; padding: 10px; margin-top: 10px; }
   .mb-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   .mb-head input { width: 120px; }
   .mb .meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .mb .meta.bad { color: var(--bad); }
   .hint { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
   .samples { display: flex; flex-wrap: wrap; gap: 8px; }
   .verdict { border-radius: 10px; padding: 14px 16px; font-weight: 700; font-size: 15px; }
@@ -66,17 +71,23 @@
 </head>
 <body>
 <header>
-  <h1>共享词嵌入续写训练 · SGD 单步对照校验</h1>
+  <h1>共享词嵌入训练页 · SGD / 蒸馏单步对照校验</h1>
   <div class="sub">
-    同一 float64 权重 W（种子 → 标准正态 × 倍率）既作输入嵌入又作输出投影；按全部有效 token
-    （目标 -100 忽略）的平均交叉熵，以 lr=0.01 做一次 SGD。自定义 autograd 损失的分块投影临时张量
-    词表轴不超过 128，且前向不保存任何分块分数/概率；右侧与独立稠密参考逐项比对。
+    同一 float64 权重 W（种子 → 标准正态 × 倍率）既作输入嵌入又作输出投影，按全词表归一化，以
+    lr=0.01 做一次 SGD。两种模式：硬标签续写（目标 -100 忽略的平均交叉熵）与教师分布蒸馏
+    （教师只给 1–8 个续写词的概率及其余词总概率，未列出的词合为一类计算样本平均交叉熵）。
+    自定义 autograd 损失的分块投影临时张量词表轴不超过 128，前向不保存任何分块分数/概率，
+    反向按块重算；右侧与独立稠密参考逐项比对，误差均 ≤1e-8 才通过。
   </div>
 </header>
 <main>
   <div class="grid">
     <section class="card">
       <h2>输入</h2>
+      <div class="tabs">
+        <button type="button" class="tab active" data-mode="ce">硬标签续写</button>
+        <button type="button" class="tab" data-mode="distill">教师分布蒸馏</button>
+      </div>
       <div class="row">
         <div>
           <label for="seed">随机种子 seed</label>
@@ -90,24 +101,46 @@
       <label for="vocab">词表大小（256–4096）</label>
       <input id="vocab" type="number" value="256" step="1" min="256" max="4096" />
 
-      <label>微批（1–4 个，总计 ≤128 个 token）</label>
-      <div id="batches"></div>
-      <div style="margin-top:10px; display:flex; gap:8px;">
-        <button id="add" type="button">+ 添加微批</button>
-        <button id="clear" type="button">清空</button>
-      </div>
-      <div class="hint">
-        每行一组“输入号, 目标号”，用逗号或空格分隔，一行一组；目标号填 -100 表示忽略。
-        必填：至少一个未被忽略的目标，否则请求被拒绝且不做参数更新。
+      <div id="panel-ce">
+        <label>微批（1–4 个，总计 ≤128 个 token）</label>
+        <div id="batches"></div>
+        <div style="margin-top:10px; display:flex; gap:8px;">
+          <button id="add" type="button">+ 添加微批</button>
+          <button id="clear" type="button">清空</button>
+        </div>
+        <div class="hint">
+          每行一组“输入号, 目标号”，用逗号或空格分隔，一行一组；目标号填 -100 表示忽略。
+          必填：至少一个未被忽略的目标，否则请求被拒绝且不做参数更新。
+        </div>
+        <div class="sep"></div>
+        <label>内置样例</label>
+        <div class="samples" id="samples"></div>
+        <div style="margin-top:16px;">
+          <button id="run" class="primary" type="button">运行对照</button>
+        </div>
       </div>
 
-      <div class="sep"></div>
-      <label>内置样例</label>
-      <div class="samples" id="samples"></div>
+      <div id="panel-distill" style="display:none;">
+        <label>蒸馏样本（1–32 条）</label>
+        <div id="dsamples"></div>
+        <div style="margin-top:10px; display:flex; gap:8px;">
+          <button id="add-dsample" type="button">+ 添加样本</button>
+          <button id="clear-dsample" type="button">清空</button>
+        </div>
+        <div class="hint">
+          每条样本：一个前缀词号；1–8 行“词号, 概率”的列出词（词号互不重复，概率非负）；
+          以及其余词的总概率。列出词概率与其余词总概率合计必须为 1。
+        </div>
+        <div class="sep"></div>
+        <label>内置蒸馏样例</label>
+        <div class="samples" id="dsample-presets"></div>
+        <div style="margin-top:16px;">
+          <button id="run-distill" class="primary" type="button">运行蒸馏对照</button>
+        </div>
+      </div>
 
-      <div style="margin-top:16px;">
-        <button id="run" class="primary" type="button">运行对照</button>
-        <span id="status" class="pill" style="margin-left:8px;">就绪</span>
+      <div style="margin-top:14px;">
+        <span id="status" class="pill">就绪</span>
       </div>
       <div id="error" class="err" style="margin-top:10px;"></div>
     </section>
@@ -119,14 +152,14 @@
         <div id="summary"></div>
       </div>
       <div class="card">
-        <h2>三项对照误差（阈值 1e-8）</h2>
+        <h2>对照误差（阈值 1e-8）</h2>
         <table>
           <thead><tr><th>对照项</th><th style="text-align:right">|差值|</th><th>判定</th></tr></thead>
           <tbody id="checks"></tbody>
         </table>
         <div class="hint">对照：自定义分块实现 vs 独立稠密参考（整体前向/反向，无分块限制）。</div>
       </div>
-      <div class="card">
+      <div class="card" id="splits-card">
         <h2>微批拆分不变量</h2>
         <table>
           <thead><tr><th>拆分方式</th><th style="text-align:right">损失</th><th style="text-align:right">Δ损失</th>
@@ -147,11 +180,57 @@
 <script>
 const IGNORE = -100;
 const MAX_TOTAL = 128;
+const MAX_DSAMPLES = 32;
+const MAX_LISTED = 8;
+const PROB_SUM_TOL = 1e-9;
 const $ = (id) => document.getElementById(id);
 let samplesCache = [];
+let distillSamplesCache = [];
+let mode = "ce";
 
+/* ---------------- mode switching & stale-conclusion handling ------------ */
+function clearResults(note) {
+  const verdict = $("verdict");
+  verdict.textContent = note || "尚未运行";
+  verdict.className = "verdict idle";
+  $("summary").innerHTML = "";
+  $("checks").innerHTML = "";
+  $("splits").innerHTML = "";
+  $("memory").innerHTML = "";
+  $("raw").textContent = "（运行后显示）";
+}
+
+function setMode(next) {
+  if (next === mode) return;
+  mode = next;
+  document.querySelectorAll(".tab").forEach((t) =>
+    t.classList.toggle("active", t.dataset.mode === mode));
+  $("panel-ce").style.display = mode === "ce" ? "" : "none";
+  $("panel-distill").style.display = mode === "distill" ? "" : "none";
+  $("splits-card").style.display = mode === "ce" ? "" : "none";
+  $("error").textContent = "";
+  clearResults();          // 切换模式后旧结论不再适用，立即撤下
+  recount();
+}
+
+document.querySelectorAll(".tab").forEach((t) =>
+  t.addEventListener("click", () => setMode(t.dataset.mode)));
+
+/* ---------------- shared helpers --------------------------------------- */
 function pairToText(p) { return p.map(([i,t]) => `${i},${t}`).join("\n"); }
 
+function fmt(x) {
+  if (x === 0) return "0";
+  if (Math.abs(x) < 1e-4 || Math.abs(x) >= 1e6) return x.toExponential(6);
+  return x.toPrecision(12);
+}
+
+function setStatus(text, cls) {
+  $("status").textContent = text;
+  $("status").className = "pill" + (cls ? " " + cls : "");
+}
+
+/* ---------------- hard-label (CE) panel -------------------------------- */
 function addBatch(name, tokens) {
   const wrap = document.createElement("div");
   wrap.className = "mb";
@@ -186,34 +265,8 @@ function parseBatchArea(text) {
   return pairs;
 }
 
-function recount() {
-  let total = 0, valid = 0, n = 0;
-  document.querySelectorAll(".mb").forEach((wrap) => {
-    n++;
-    let count = 0, v = 0;
-    try {
-      const pairs = parseBatchArea(wrap.querySelector(".mb-tokens").value);
-      count = pairs.length;
-      v = pairs.filter(([, t]) => t !== IGNORE).length;
-    } catch (e) { /* ignore until submit */ }
-    total += count; valid += v;
-    wrap.querySelector(".meta").textContent = `${count} 个 token，有效 ${v}`;
-  });
-  const status = $("status");
-  if (total > MAX_TOTAL) {
-    status.textContent = `总 token ${total} > ${MAX_TOTAL}`;
-    status.className = "pill bad";
-  } else if (n < 1 || n > 4) {
-    status.textContent = `微批数 ${n}（需 1–4）`;
-    status.className = "pill bad";
-  } else {
-    status.textContent = `共 ${n} 个微批 / ${total} token / 有效 ${valid}`;
-    status.className = "pill";
-  }
-}
-
 function collectPayload() {
-  const batches = [...document.querySelectorAll(".mb")].map((wrap, idx) => ({
+  const batches = [...document.querySelectorAll("#batches .mb")].map((wrap, idx) => ({
     name: wrap.querySelector(".mb-name").value.trim() || `mb${idx + 1}`,
     tokens: parseBatchArea(wrap.querySelector(".mb-tokens").value),
   }));
@@ -225,13 +278,163 @@ function collectPayload() {
   };
 }
 
-function fmt(x) {
-  if (x === 0) return "0";
-  if (Math.abs(x) < 1e-4 || Math.abs(x) >= 1e6) return x.toExponential(6);
-  return x.toPrecision(12);
+/* ---------------- distillation panel ----------------------------------- */
+function listedToText(listed) { return listed.map(([i,p]) => `${i}, ${p}`).join("\n"); }
+
+function addDSample(sample) {
+  const wrap = document.createElement("div");
+  wrap.className = "mb dsample";
+  wrap.innerHTML = `
+    <div class="mb-head">
+      <span class="ds-title pill"></span>
+      <button type="button" class="remove">删除</button>
+    </div>
+    <div class="row">
+      <div>
+        <label>前缀词号</label>
+        <input class="ds-prefix" type="number" step="1" />
+      </div>
+      <div>
+        <label>其余词总概率</label>
+        <input class="ds-rest" type="number" step="any" min="0" max="1" />
+      </div>
+    </div>
+    <label>列出词号与教师概率（每行 “词号, 概率”，1–8 行，词号互不重复）</label>
+    <textarea class="ds-listed" spellcheck="false"></textarea>
+    <div class="meta"></div>`;
+  const s = sample || { prefix: 5, listed: [[5, 0.6], [9, 0.1]], rest: 0.3 };
+  wrap.querySelector(".ds-prefix").value = s.prefix;
+  wrap.querySelector(".ds-rest").value = s.rest;
+  wrap.querySelector(".ds-listed").value = listedToText(s.listed);
+  wrap.querySelector(".remove").addEventListener("click", () => { wrap.remove(); recount(); });
+  wrap.querySelector(".ds-listed").addEventListener("input", recount);
+  wrap.querySelector(".ds-rest").addEventListener("input", recount);
+  $("dsamples").appendChild(wrap);
+  recount();
 }
 
-function render(report) {
+function parseListedArea(text) {
+  const listed = [];
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const parts = line.split(/[,\s]+/).filter(Boolean);
+    if (parts.length !== 2) throw new Error(`无法解析行：「${line}」（需要“词号, 概率”）`);
+    const id = Number(parts[0]), prob = Number(parts[1]);
+    if (!Number.isInteger(id)) throw new Error(`行「${line}」的词号不是整数`);
+    if (!Number.isFinite(prob)) throw new Error(`行「${line}」的概率不是有限数字`);
+    listed.push([id, prob]);
+  }
+  return listed;
+}
+
+function validateDistill(samples, vocab) {
+  if (samples.length < 1 || samples.length > MAX_DSAMPLES)
+    throw new Error(`样本数量需为 1–${MAX_DSAMPLES}，当前 ${samples.length}`);
+  samples.forEach((s, i) => {
+    const label = `第 ${i + 1} 条样本`;
+    if (!Number.isInteger(s.prefix) || s.prefix < 0 || s.prefix >= vocab)
+      throw new Error(`${label} 的前缀词号须为 [0, ${vocab}) 内整数`);
+    if (s.listed.length < 1 || s.listed.length > MAX_LISTED)
+      throw new Error(`${label} 需要 1–${MAX_LISTED} 个列出词，当前 ${s.listed.length}`);
+    const seen = new Set();
+    let sum = 0;
+    for (const [id, prob] of s.listed) {
+      if (id < 0 || id >= vocab) throw new Error(`${label} 的列出词号 ${id} 超出词表`);
+      if (seen.has(id)) throw new Error(`${label} 的列出词号 ${id} 重复`);
+      seen.add(id);
+      if (!(prob >= 0)) throw new Error(`${label} 列出词 ${id} 的概率必须非负`);
+      sum += prob;
+    }
+    if (!(s.rest >= 0)) throw new Error(`${label} 的其余词总概率必须非负`);
+    if (Math.abs(sum + s.rest - 1) > PROB_SUM_TOL)
+      throw new Error(`${label} 的教师概率合计必须为 1，当前为 ${sum + s.rest}`);
+  });
+}
+
+function collectDistillPayload() {
+  const vocab = Number($("vocab").value);
+  const samples = [...document.querySelectorAll("#dsamples .dsample")].map((wrap) => ({
+    prefix: Number(wrap.querySelector(".ds-prefix").value),
+    listed: parseListedArea(wrap.querySelector(".ds-listed").value),
+    rest: Number(wrap.querySelector(".ds-rest").value),
+  }));
+  validateDistill(samples, vocab);
+  return {
+    seed: Number($("seed").value),
+    scale: Number($("scale").value),
+    vocab_size: vocab,
+    samples,
+  };
+}
+
+/* ---------------- counters --------------------------------------------- */
+function recount() {
+  if (mode === "ce") {
+    let total = 0, valid = 0, n = 0;
+    document.querySelectorAll("#batches .mb").forEach((wrap) => {
+      n++;
+      let count = 0, v = 0;
+      try {
+        const pairs = parseBatchArea(wrap.querySelector(".mb-tokens").value);
+        count = pairs.length;
+        v = pairs.filter(([, t]) => t !== IGNORE).length;
+      } catch (e) { /* ignore until submit */ }
+      total += count; valid += v;
+      wrap.querySelector(".meta").textContent = `${count} 个 token，有效 ${v}`;
+    });
+    if (total > MAX_TOTAL) setStatus(`总 token ${total} > ${MAX_TOTAL}`, "bad");
+    else if (n < 1 || n > 4) setStatus(`微批数 ${n}（需 1–4）`, "bad");
+    else setStatus(`共 ${n} 个微批 / ${total} token / 有效 ${valid}`);
+  } else {
+    const wraps = [...document.querySelectorAll("#dsamples .dsample")];
+    wraps.forEach((wrap, i) => {
+      wrap.querySelector(".ds-title").textContent = `样本 #${i + 1}`;
+      const meta = wrap.querySelector(".meta");
+      meta.classList.remove("bad");
+      try {
+        const listed = parseListedArea(wrap.querySelector(".ds-listed").value);
+        const rest = Number(wrap.querySelector(".ds-rest").value);
+        const sum = listed.reduce((a, [, p]) => a + p, 0) + rest;
+        const ids = new Set(listed.map(([id]) => id));
+        const bits = [`${listed.length} 个列出词`, `合计 ${sum.toPrecision(12)}`];
+        if (ids.size !== listed.length) bits.push("词号重复！");
+        if (listed.length > MAX_LISTED) bits.push(`超过 ${MAX_LISTED} 个！`);
+        if (Math.abs(sum - 1) > PROB_SUM_TOL) bits.push("合计须为 1！");
+        meta.textContent = bits.join("，");
+        if (ids.size !== listed.length || listed.length > MAX_LISTED ||
+            listed.length < 1 || Math.abs(sum - 1) > PROB_SUM_TOL)
+          meta.classList.add("bad");
+      } catch (e) {
+        meta.textContent = "待修正：" + e.message;
+        meta.classList.add("bad");
+      }
+    });
+    if (wraps.length < 1 || wraps.length > MAX_DSAMPLES)
+      setStatus(`样本数 ${wraps.length}（需 1–${MAX_DSAMPLES}）`, "bad");
+    else setStatus(`共 ${wraps.length} 条蒸馏样本`);
+  }
+}
+
+/* ---------------- rendering -------------------------------------------- */
+function renderMemory(m, savedShapesKey) {
+  const shapes = m[savedShapesKey];
+  $("memory").innerHTML =
+    `分块词表轴上限：<b>${m.max_vocab_chunk}</b> ｜ 前向保存分数/概率：` +
+    `<b class="${m.scores_or_probabilities_saved ? "bad" : "ok"}">${m.scores_or_probabilities_saved ? "是" : "否"}</b>` +
+    ` ｜ 反向重算：<b class="ok">${m.recompute_in_backward ? "是" : "否"}</b><br>` +
+    `跨前向/反向保存的张量：${m.saved_tensor_roles.join("、")}<br>` +
+    `保存形状：[${shapes.map((s) => "(" + s.map((x) => x.join("×")).join("), (") + ")").join(" ｜ ")}]`;
+}
+
+function checkRows(rows) {
+  $("checks").innerHTML = rows.map(([label, value, pass]) => `
+    <tr><td>${label}</td>
+        <td class="num">${fmt(value)}</td>
+        <td class="${pass ? "ok" : "bad"}">${pass ? "✓ ≤1e-8" : "✗ >1e-8"}</td></tr>`).join("");
+}
+
+function renderCE(report) {
   $("raw").textContent = JSON.stringify(report, null, 2);
   const verdict = $("verdict");
   verdict.textContent = report.message;
@@ -239,6 +442,7 @@ function render(report) {
   const c = report.config;
   $("summary").innerHTML = `
     <table><tbody>
+      <tr><th>模式</th><td class="num">硬标签续写</td></tr>
       <tr><th>词表 / 嵌入维度</th><td class="num">${c.vocab_size} × 16</td></tr>
       <tr><th>有效 token / 总数</th><td class="num">${c.valid_tokens} / ${c.total_tokens}</td></tr>
       <tr><th>自定义损失</th><td class="num">${fmt(report.chunked.loss)}</td></tr>
@@ -246,46 +450,53 @@ function render(report) {
       <tr><th>梯度范数（分块 / 稠密）</th><td class="num">${fmt(report.chunked.grad_norm)} / ${fmt(report.dense.grad_norm)}</td></tr>
       <tr><th>更新后 W 范数（分块 / 稠密）</th><td class="num">${fmt(report.chunked.weight_norm)} / ${fmt(report.dense.weight_norm)}</td></tr>
     </tbody></table>`;
-
-  const rows = [
+  checkRows([
     ["损失（loss）", report.errors.loss_abs_diff, report.checks.loss],
     ["共享 W 梯度（grad）", report.errors.grad_max_abs_diff, report.checks.grad],
     ["更新后权重（weight）", report.errors.weight_max_abs_diff, report.checks.updated_weight],
     ["拆分：损失不变量", report.split.max_loss_diff, report.checks.split_loss],
     ["拆分：梯度不变量", report.split.max_grad_diff, report.checks.split_grad],
     ["拆分：权重不变量", report.split.max_weight_diff, report.checks.split_weight],
-  ];
-  $("checks").innerHTML = rows.map(([label, value, pass]) => `
-    <tr><td>${label}</td>
-        <td class="num">${fmt(value)}</td>
-        <td class="${pass ? "ok" : "bad"}">${pass ? "✓ ≤1e-8" : "✗ >1e-8"}</td></tr>`).join("");
-
+  ]);
   $("splits").innerHTML = report.split.runs.map((r) => `
     <tr><td>${r.microbatches} 个微批（有效 ${r.valid_tokens}/${r.token_count}）</td>
         <td class="num">${fmt(r.loss)}</td>
         <td class="num">${fmt(r.loss_diff_vs_user)}</td>
         <td class="num">${fmt(r.grad_diff_vs_user)}</td>
         <td class="num">${fmt(r.weight_diff_vs_user)}</td></tr>`).join("");
-
-  const m = report.memory;
-  $("memory").innerHTML =
-    `分块词表轴上限：<b>${m.max_vocab_chunk}</b> ｜ 前向保存分数/概率：` +
-    `<b class="${m.scores_or_probabilities_saved ? "bad" : "ok"}">${m.scores_or_probabilities_saved ? "是" : "否"}</b>` +
-    ` ｜ 反向重算：<b class="ok">${m.recompute_in_backward ? "是" : "否"}</b><br>` +
-    `跨前向/反向保存的张量：${m.saved_tensor_roles.join("、")}<br>` +
-    `各微批保存形状：[${m.saved_shapes_per_microbatch.map((s) => "(" + s.map((x) => x.join("×")).join("), (") + ")").join(" ｜ ")}]`;
+  renderMemory(report.memory, "saved_shapes_per_microbatch");
 }
 
-async function run() {
-  const btn = $("run");
-  $("error").textContent = "";
-  let payload;
-  try { payload = collectPayload(); }
-  catch (e) { $("error").textContent = e.message; return; }
+function renderDistill(report) {
+  $("raw").textContent = JSON.stringify(report, null, 2);
+  const verdict = $("verdict");
+  verdict.textContent = report.message;
+  verdict.className = "verdict " + (report.ok ? "pass" : "fail");
+  const c = report.config;
+  $("summary").innerHTML = `
+    <table><tbody>
+      <tr><th>模式</th><td class="num">教师分布蒸馏（top-k + 其余类）</td></tr>
+      <tr><th>词表 / 嵌入维度</th><td class="num">${c.vocab_size} × 16</td></tr>
+      <tr><th>样本数 / 列出词总数</th><td class="num">${c.samples} / ${c.listed_total}</td></tr>
+      <tr><th>自定义损失</th><td class="num">${fmt(report.chunked.loss)}</td></tr>
+      <tr><th>稠密参考损失</th><td class="num">${fmt(report.dense.loss)}</td></tr>
+      <tr><th>梯度范数（分块 / 稠密）</th><td class="num">${fmt(report.chunked.grad_norm)} / ${fmt(report.dense.grad_norm)}</td></tr>
+      <tr><th>更新后 W 范数（分块 / 稠密）</th><td class="num">${fmt(report.chunked.weight_norm)} / ${fmt(report.dense.weight_norm)}</td></tr>
+    </tbody></table>`;
+  checkRows([
+    ["损失（loss）", report.errors.loss_abs_diff, report.checks.loss],
+    ["共享 W 梯度（grad）", report.errors.grad_max_abs_diff, report.checks.grad],
+    ["更新后权重（weight）", report.errors.weight_max_abs_diff, report.checks.updated_weight],
+  ]);
+  renderMemory(report.memory, "saved_shapes");
+}
+
+/* ---------------- runners ---------------------------------------------- */
+async function submit(url, payload, render, btn) {
   btn.disabled = true;
-  $("status").textContent = "运行中…";
+  setStatus("运行中…");
   try {
-    const resp = await fetch("/api/run", {
+    const resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -296,19 +507,44 @@ async function run() {
       throw new Error(detail || `HTTP ${resp.status}`);
     }
     render(body);
-    $("status").textContent = `完成 · ${body.ok ? "通过" : "未通过"}`;
-    $("status").className = "pill " + (body.ok ? "ok" : "bad");
+    setStatus(`完成 · ${body.ok ? "通过" : "未通过"}`, body.ok ? "ok" : "bad");
   } catch (e) {
+    // 输入无效或计算失败：撤下旧结论，只展示错误
+    clearResults("结论已撤下（输入无效或计算失败）");
     $("error").textContent = "请求失败：" + e.message;
-    $("verdict").textContent = "请求被拒绝或失败";
-    $("verdict").className = "verdict fail";
-    $("status").textContent = "失败";
-    $("status").className = "pill bad";
+    setStatus("失败", "bad");
   } finally {
     btn.disabled = false;
   }
 }
 
+function runCE() {
+  $("error").textContent = "";
+  let payload;
+  try { payload = collectPayload(); }
+  catch (e) {
+    clearResults("结论已撤下（输入无效）");
+    $("error").textContent = e.message;
+    setStatus("输入无效", "bad");
+    return;
+  }
+  submit("/api/run", payload, renderCE, $("run"));
+}
+
+function runDistill() {
+  $("error").textContent = "";
+  let payload;
+  try { payload = collectDistillPayload(); }
+  catch (e) {
+    clearResults("结论已撤下（输入无效）");
+    $("error").textContent = e.message;
+    setStatus("输入无效", "bad");
+    return;
+  }
+  submit("/api/distill/run", payload, renderDistill, $("run-distill"));
+}
+
+/* ---------------- presets ---------------------------------------------- */
 async function loadSamples() {
   try {
     const resp = await fetch("/api/samples");
@@ -337,16 +573,54 @@ function applySample(sample) {
   $("error").textContent = sample.note;
 }
 
+async function loadDistillSamples() {
+  try {
+    const resp = await fetch("/api/distill/samples");
+    distillSamplesCache = (await resp.json()).samples || [];
+  } catch (e) { distillSamplesCache = []; }
+  $("dsample-presets").innerHTML = "";
+  distillSamplesCache.forEach((s) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = s.title;
+    b.title = s.note;
+    b.addEventListener("click", () => applyDistillSample(s));
+    $("dsample-presets").appendChild(b);
+  });
+  if (!distillSamplesCache.length) {
+    $("dsample-presets").textContent = "样例加载失败（请确认 /api/distill/samples 可用）";
+  }
+}
+
+function applyDistillSample(sample) {
+  $("seed").value = sample.payload.seed;
+  $("scale").value = sample.payload.scale;
+  $("vocab").value = sample.payload.vocab_size;
+  $("dsamples").innerHTML = "";
+  sample.payload.samples.forEach((s) => addDSample(s));
+  $("error").textContent = sample.note;
+}
+
+/* ---------------- wiring ------------------------------------------------ */
 $("add").addEventListener("click", () => {
-  if (document.querySelectorAll(".mb").length >= 4) return;
-  addBatch(`mb${document.querySelectorAll(".mb").length + 1}`, "1, 2");
+  if (document.querySelectorAll("#batches .mb").length >= 4) return;
+  addBatch(`mb${document.querySelectorAll("#batches .mb").length + 1}`, "1, 2");
 });
 $("clear").addEventListener("click", () => { $("batches").innerHTML = ""; recount(); });
-$("run").addEventListener("click", run);
+$("run").addEventListener("click", runCE);
+
+$("add-dsample").addEventListener("click", () => {
+  if (document.querySelectorAll("#dsamples .dsample").length >= MAX_DSAMPLES) return;
+  addDSample();
+});
+$("clear-dsample").addEventListener("click", () => { $("dsamples").innerHTML = ""; recount(); });
+$("run-distill").addEventListener("click", runDistill);
 
 addBatch("dup-A", "4, 4\n4, 4\n7, 4\n4, 7");
 addBatch("dup-B", "4, 4\n9, 9\n9, -100\n4, 9");
+addDSample();
 loadSamples();
+loadDistillSamples();
 </script>
 </body>
 </html>

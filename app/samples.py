@@ -79,3 +79,99 @@ SAMPLES = [
         },
     },
 ]
+
+
+def _full_32_samples():
+    """32 deterministic samples (max allowed), distinct listed ids per sample."""
+    out = []
+    for i in range(32):
+        out.append(
+            {
+                "prefix": (13 * i + 1) % 512,
+                "listed": [
+                    [(29 * i + 3) % 512, 0.5],
+                    [(53 * i + 7) % 512, 0.25],
+                ],
+                "rest": 0.25,
+            }
+        )
+    return out
+
+
+DISTILL_SAMPLES = [
+    {
+        "id": "distill-basic-mix",
+        "title": "蒸馏·混合列出词（k=1..8、重复前缀、列出词含前缀自身）",
+        "note": (
+            "4 条样本：前缀 5 出现两次（梯度按行累加），列出词数从 1 到 8 不等，"
+            "第一条的列出词包含前缀自身；教师概率均非负且合计为 1。"
+        ),
+        "payload": {
+            "seed": 20240517,
+            "scale": 1.0,
+            "vocab_size": 256,
+            "samples": [
+                {"prefix": 5, "listed": [[5, 0.6], [9, 0.1]], "rest": 0.3},
+                {"prefix": 5, "listed": [[7, 0.25], [8, 0.25], [9, 0.25]], "rest": 0.25},
+                {"prefix": 200, "listed": [[0, 0.5]], "rest": 0.5},
+                {"prefix": 17,
+                 "listed": [[1, 0.1], [2, 0.1], [3, 0.1], [4, 0.1],
+                            [5, 0.1], [6, 0.1], [7, 0.1], [8, 0.1]],
+                 "rest": 0.2},
+            ],
+        },
+    },
+    {
+        "id": "distill-edge-masses",
+        "title": "蒸馏·边界质量（其余类为 0、其余类为 1）",
+        "note": (
+            "第一条其余词总概率为 0（教师质量全部列出）；第二条列出词概率全为 0，"
+            "其余类承担全部质量；第三条前缀与第二条相同。"
+        ),
+        "payload": {
+            "seed": 991,
+            "scale": 0.5,
+            "vocab_size": 300,
+            "samples": [
+                {"prefix": 3, "listed": [[3, 0.7], [4, 0.3]], "rest": 0.0},
+                {"prefix": 9, "listed": [[10, 0.0], [11, 0.0]], "rest": 1.0},
+                {"prefix": 9, "listed": [[250, 0.45]], "rest": 0.55},
+            ],
+        },
+    },
+    {
+        "id": "distill-large-scores-rest",
+        "title": "蒸馏·大分数（scale=100，其余类概率下溢仍须算准）",
+        "note": (
+            "seed=424242、前缀 7 时学生 logits 的 argmax 正是 7 号词（logit≈182156，"
+            "与次大值相差≈35474）。第一条把 7 号列入教师分布：其余类学生概率 "
+            "exp(-35474) 在 float64 中下溢为 0，朴素 1-Σs 会得到 log(0)=-inf，"
+            "而分块实现用 masked logsumexp 直接算 log s_rest，损失与梯度仍与"
+            "稠密参考一致到 1e-8。第二、三条对照：其余类概率≈1、前缀重复。"
+        ),
+        "payload": {
+            "seed": 424242,
+            "scale": 100.0,
+            "vocab_size": 4096,
+            "samples": [
+                {"prefix": 7, "listed": [[7, 0.9], [123, 0.05]], "rest": 0.05},
+                {"prefix": 3000, "listed": [[1, 0.3], [2, 0.3]], "rest": 0.4},
+                {"prefix": 7, "listed": [[759, 0.5], [3228, 0.2]], "rest": 0.3},
+            ],
+        },
+    },
+    {
+        "id": "distill-full-32",
+        "title": "蒸馏·满 32 条样本（上限）",
+        "note": (
+            "32 条样本达到条数上限，每条 2 个列出词（词号由确定性公式生成、"
+            "样本内互不重复），其余类概率 0.25。"
+        ),
+        "payload": {
+            "seed": 7,
+            "scale": 2.0,
+            "vocab_size": 512,
+            "samples": _full_32_samples(),
+        },
+    },
+]

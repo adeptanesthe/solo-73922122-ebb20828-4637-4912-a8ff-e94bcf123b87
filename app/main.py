@@ -10,8 +10,9 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from .distill import evaluate_distill
 from .engine import ValidationError, evaluate
-from .samples import SAMPLES
+from .samples import DISTILL_SAMPLES, SAMPLES
 
 # The matrices are small (<=128 tokens, vocab <=4096, dim 16); more threads
 # cost more than they save.  Keep the container's footprint predictable.
@@ -43,5 +44,18 @@ def samples() -> dict:
 def run(payload: dict = Body(...)) -> dict:
     try:
         return evaluate(payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/distill/samples")
+def distill_samples() -> dict:
+    return {"samples": DISTILL_SAMPLES}
+
+
+@app.post("/api/distill/run")
+def run_distill(payload: dict = Body(...)) -> dict:
+    try:
+        return evaluate_distill(payload)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
