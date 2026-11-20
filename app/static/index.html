@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>共享词嵌入 SGD 对照校验</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #182030; --panel-2: #1f293b; --line: #2c3a52;
+    --text: #e6edf7; --muted: #9aabc4; --accent: #6ea8fe; --ok: #3ddc97;
+    --bad: #ff6b6b; --warn: #f7c948;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: ui-sans-serif, system-ui, "Segoe UI", "PingFang SC",
+         "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
+  header { padding: 20px 28px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0 0 6px; font-size: 20px; }
+  .sub { color: var(--muted); font-size: 13px; line-height: 1.6; }
+  main { padding: 20px 28px 60px; max-width: 1180px; margin: 0 auto; }
+  .grid { display: grid; grid-template-columns: 420px 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 16px; }
+  .card h2 { margin: 0 0 12px; font-size: 14px; letter-spacing: .04em;
+             color: var(--muted); text-transform: uppercase; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input[type=number], textarea, select {
+    width: 100%; background: #0c111b; color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 8px 10px; font-size: 13px; font-family: ui-monospace,
+    SFMono-Regular, Menlo, monospace;
+  }
+  textarea { min-height: 118px; resize: vertical; }
+  button { cursor: pointer; border: 1px solid var(--line); border-radius: 7px;
+           background: var(--panel-2); color: var(--text); padding: 8px 12px;
+           font-size: 13px; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #07111f; border-color: var(--accent);
+                   font-weight: 700; }
+  button.primary:disabled { opacity: .55; cursor: progress; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .mb { border: 1px dashed var(--line); border-radius: 8px; padding: 10px; margin-top: 10px; }
+  .mb-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .mb-head input { width: 120px; }
+  .mb .meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+  .samples { display: flex; flex-wrap: wrap; gap: 8px; }
+  .verdict { border-radius: 10px; padding: 14px 16px; font-weight: 700; font-size: 15px; }
+  .verdict.pass { background: rgba(61,220,151,.12); color: var(--ok);
+                  border: 1px solid rgba(61,220,151,.45); }
+  .verdict.fail { background: rgba(255,107,107,.12); color: var(--bad);
+                  border: 1px solid rgba(255,107,107,.45); }
+  .verdict.idle { background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase;
+       letter-spacing: .04em; }
+  td.num { font-family: ui-monospace, Menlo, monospace; text-align: right; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+          border: 1px solid var(--line); color: var(--muted); }
+  pre { background: #0c111b; border: 1px solid var(--line); border-radius: 8px;
+        padding: 10px; overflow: auto; font-size: 12px; max-height: 260px; }
+  .err { color: var(--bad); font-size: 13px; white-space: pre-wrap; }
+  .sep { height: 1px; background: var(--line); margin: 16px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>共享词嵌入续写训练 · SGD 单步对照校验</h1>
+  <div class="sub">
+    同一 float64 权重 W（种子 → 标准正态 × 倍率）既作输入嵌入又作输出投影；按全部有效 token
+    （目标 -100 忽略）的平均交叉熵，以 lr=0.01 做一次 SGD。自定义 autograd 损失的分块投影临时张量
+    词表轴不超过 128，且前向不保存任何分块分数/概率；右侧与独立稠密参考逐项比对。
+  </div>
+</header>
+<main>
+  <div class="grid">
+    <section class="card">
+      <h2>输入</h2>
+      <div class="row">
+        <div>
+          <label for="seed">随机种子 seed</label>
+          <input id="seed" type="number" value="20240517" step="1" />
+        </div>
+        <div>
+          <label for="scale">权重倍率 scale（0.1–100）</label>
+          <input id="scale" type="number" value="1" step="0.1" min="0.1" max="100" />
+        </div>
+      </div>
+      <label for="vocab">词表大小（256–4096）</label>
+      <input id="vocab" type="number" value="256" step="1" min="256" max="4096" />
+
+      <label>微批（1–4 个，总计 ≤128 个 token）</label>
+      <div id="batches"></div>
+      <div style="margin-top:10px; display:flex; gap:8px;">
+        <button id="add" type="button">+ 添加微批</button>
+        <button id="clear" type="button">清空</button>
+      </div>
+      <div class="hint">
+        每行一组“输入号, 目标号”，用逗号或空格分隔，一行一组；目标号填 -100 表示忽略。
+        必填：至少一个未被忽略的目标，否则请求被拒绝且不做参数更新。
+      </div>
+
+      <div class="sep"></div>
+      <label>内置样例</label>
+      <div class="samples" id="samples"></div>
+
+      <div style="margin-top:16px;">
+        <button id="run" class="primary" type="button">运行对照</button>
+        <span id="status" class="pill" style="margin-left:8px;">就绪</span>
+      </div>
+      <div id="error" class="err" style="margin-top:10px;"></div>
+    </section>
+
+    <section style="display:grid; gap:20px;">
+      <div class="card">
+        <h2>结论</h2>
+        <div id="verdict" class="verdict idle">尚未运行</div>
+        <div id="summary"></div>
+      </div>
+      <div class="card">
+        <h2>三项对照误差（阈值 1e-8）</h2>
+        <table>
+          <thead><tr><th>对照项</th><th style="text-align:right">|差值|</th><th>判定</th></tr></thead>
+          <tbody id="checks"></tbody>
+        </table>
+        <div class="hint">对照：自定义分块实现 vs 独立稠密参考（整体前向/反向，无分块限制）。</div>
+      </div>
+      <div class="card">
+        <h2>微批拆分不变量</h2>
+        <table>
+          <thead><tr><th>拆分方式</th><th style="text-align:right">损失</th><th style="text-align:right">Δ损失</th>
+          <th style="text-align:right">Δ梯度</th><th style="text-align:right">Δ更新后权重</th></tr></thead>
+          <tbody id="splits"></tbody>
+        </table>
+        <div class="hint">同一 token 流重新拆成 1–4 个微批；损失、共享 W 梯度与更新后权重均应不变。</div>
+      </div>
+      <div class="card">
+        <h2>内存约束与原始报告</h2>
+        <div id="memory" class="hint"></div>
+        <pre id="raw">（运行后显示）</pre>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+const IGNORE = -100;
+const MAX_TOTAL = 128;
+const $ = (id) => document.getElementById(id);
+let samplesCache = [];
+
+function pairToText(p) { return p.map(([i,t]) => `${i},${t}`).join("\n"); }
+
+function addBatch(name, tokens) {
+  const wrap = document.createElement("div");
+  wrap.className = "mb";
+  wrap.innerHTML = `
+    <div class="mb-head">
+      <input class="mb-name" placeholder="微批名称" />
+      <button type="button" class="remove">删除</button>
+    </div>
+    <textarea class="mb-tokens" spellcheck="false"></textarea>
+    <div class="meta"></div>`;
+  wrap.querySelector(".mb-name").value = name;
+  wrap.querySelector(".mb-tokens").value = tokens || "1, 2\n3, 4";
+  wrap.querySelector(".remove").addEventListener("click", () => { wrap.remove(); recount(); });
+  wrap.querySelector(".mb-tokens").addEventListener("input", recount);
+  $("batches").appendChild(wrap);
+  recount();
+}
+
+function parseBatchArea(text) {
+  const pairs = [];
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const parts = line.split(/[,\s]+/).filter(Boolean);
+    if (parts.length !== 2) throw new Error(`无法解析行：「${line}」（需要“输入号, 目标号”）`);
+    const inp = Number(parts[0]), tgt = Number(parts[1]);
+    if (!Number.isInteger(inp) || !Number.isInteger(tgt))
+      throw new Error(`行「${line}」不是整数`);
+    pairs.push([inp, tgt]);
+  }
+  if (!pairs.length) throw new Error("微批为空");
+  return pairs;
+}
+
+function recount() {
+  let total = 0, valid = 0, n = 0;
+  document.querySelectorAll(".mb").forEach((wrap) => {
+    n++;
+    let count = 0, v = 0;
+    try {
+      const pairs = parseBatchArea(wrap.querySelector(".mb-tokens").value);
+      count = pairs.length;
+      v = pairs.filter(([, t]) => t !== IGNORE).length;
+    } catch (e) { /* ignore until submit */ }
+    total += count; valid += v;
+    wrap.querySelector(".meta").textContent = `${count} 个 token，有效 ${v}`;
+  });
+  const status = $("status");
+  if (total > MAX_TOTAL) {
+    status.textContent = `总 token ${total} > ${MAX_TOTAL}`;
+    status.className = "pill bad";
+  } else if (n < 1 || n > 4) {
+    status.textContent = `微批数 ${n}（需 1–4）`;
+    status.className = "pill bad";
+  } else {
+    status.textContent = `共 ${n} 个微批 / ${total} token / 有效 ${valid}`;
+    status.className = "pill";
+  }
+}
+
+function collectPayload() {
+  const batches = [...document.querySelectorAll(".mb")].map((wrap, idx) => ({
+    name: wrap.querySelector(".mb-name").value.trim() || `mb${idx + 1}`,
+    tokens: parseBatchArea(wrap.querySelector(".mb-tokens").value),
+  }));
+  return {
+    seed: Number($("seed").value),
+    scale: Number($("scale").value),
+    vocab_size: Number($("vocab").value),
+    microbatches: batches,
+  };
+}
+
+function fmt(x) {
+  if (x === 0) return "0";
+  if (Math.abs(x) < 1e-4 || Math.abs(x) >= 1e6) return x.toExponential(6);
+  return x.toPrecision(12);
+}
+
+function render(report) {
+  $("raw").textContent = JSON.stringify(report, null, 2);
+  const verdict = $("verdict");
+  verdict.textContent = report.message;
+  verdict.className = "verdict " + (report.ok ? "pass" : "fail");
+  const c = report.config;
+  $("summary").innerHTML = `
+    <table><tbody>
+      <tr><th>词表 / 嵌入维度</th><td class="num">${c.vocab_size} × 16</td></tr>
+      <tr><th>有效 token / 总数</th><td class="num">${c.valid_tokens} / ${c.total_tokens}</td></tr>
+      <tr><th>自定义损失</th><td class="num">${fmt(report.chunked.loss)}</td></tr>
+      <tr><th>稠密参考损失</th><td class="num">${fmt(report.dense.loss)}</td></tr>
+      <tr><th>梯度范数（分块 / 稠密）</th><td class="num">${fmt(report.chunked.grad_norm)} / ${fmt(report.dense.grad_norm)}</td></tr>
+      <tr><th>更新后 W 范数（分块 / 稠密）</th><td class="num">${fmt(report.chunked.weight_norm)} / ${fmt(report.dense.weight_norm)}</td></tr>
+    </tbody></table>`;
+
+  const rows = [
+    ["损失（loss）", report.errors.loss_abs_diff, report.checks.loss],
+    ["共享 W 梯度（grad）", report.errors.grad_max_abs_diff, report.checks.grad],
+    ["更新后权重（weight）", report.errors.weight_max_abs_diff, report.checks.updated_weight],
+    ["拆分：损失不变量", report.split.max_loss_diff, report.checks.split_loss],
+    ["拆分：梯度不变量", report.split.max_grad_diff, report.checks.split_grad],
+    ["拆分：权重不变量", report.split.max_weight_diff, report.checks.split_weight],
+  ];
+  $("checks").innerHTML = rows.map(([label, value, pass]) => `
+    <tr><td>${label}</td>
+        <td class="num">${fmt(value)}</td>
+        <td class="${pass ? "ok" : "bad"}">${pass ? "✓ ≤1e-8" : "✗ >1e-8"}</td></tr>`).join("");
+
+  $("splits").innerHTML = report.split.runs.map((r) => `
+    <tr><td>${r.microbatches} 个微批（有效 ${r.valid_tokens}/${r.token_count}）</td>
+        <td class="num">${fmt(r.loss)}</td>
+        <td class="num">${fmt(r.loss_diff_vs_user)}</td>
+        <td class="num">${fmt(r.grad_diff_vs_user)}</td>
+        <td class="num">${fmt(r.weight_diff_vs_user)}</td></tr>`).join("");
+
+  const m = report.memory;
+  $("memory").innerHTML =
+    `分块词表轴上限：<b>${m.max_vocab_chunk}</b> ｜ 前向保存分数/概率：` +
+    `<b class="${m.scores_or_probabilities_saved ? "bad" : "ok"}">${m.scores_or_probabilities_saved ? "是" : "否"}</b>` +
+    ` ｜ 反向重算：<b class="ok">${m.recompute_in_backward ? "是" : "否"}</b><br>` +
+    `跨前向/反向保存的张量：${m.saved_tensor_roles.join("、")}<br>` +
+    `各微批保存形状：[${m.saved_shapes_per_microbatch.map((s) => "(" + s.map((x) => x.join("×")).join("), (") + ")").join(" ｜ ")}]`;
+}
+
+async function run() {
+  const btn = $("run");
+  $("error").textContent = "";
+  let payload;
+  try { payload = collectPayload(); }
+  catch (e) { $("error").textContent = e.message; return; }
+  btn.disabled = true;
+  $("status").textContent = "运行中…";
+  try {
+    const resp = await fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await resp.json();
+    if (!resp.ok) {
+      const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      throw new Error(detail || `HTTP ${resp.status}`);
+    }
+    render(body);
+    $("status").textContent = `完成 · ${body.ok ? "通过" : "未通过"}`;
+    $("status").className = "pill " + (body.ok ? "ok" : "bad");
+  } catch (e) {
+    $("error").textContent = "请求失败：" + e.message;
+    $("verdict").textContent = "请求被拒绝或失败";
+    $("verdict").className = "verdict fail";
+    $("status").textContent = "失败";
+    $("status").className = "pill bad";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function loadSamples() {
+  try {
+    const resp = await fetch("/api/samples");
+    samplesCache = (await resp.json()).samples || [];
+  } catch (e) { samplesCache = []; }
+  $("samples").innerHTML = "";
+  samplesCache.forEach((s) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = s.title;
+    b.title = s.note;
+    b.addEventListener("click", () => applySample(s));
+    $("samples").appendChild(b);
+  });
+  if (!samplesCache.length) {
+    $("samples").textContent = "样例加载失败（请确认 /api/samples 可用）";
+  }
+}
+
+function applySample(sample) {
+  $("seed").value = sample.payload.seed;
+  $("scale").value = sample.payload.scale;
+  $("vocab").value = sample.payload.vocab_size;
+  $("batches").innerHTML = "";
+  sample.payload.microbatches.forEach((mb) => addBatch(mb.name, pairToText(mb.tokens)));
+  $("error").textContent = sample.note;
+}
+
+$("add").addEventListener("click", () => {
+  if (document.querySelectorAll(".mb").length >= 4) return;
+  addBatch(`mb${document.querySelectorAll(".mb").length + 1}`, "1, 2");
+});
+$("clear").addEventListener("click", () => { $("batches").innerHTML = ""; recount(); });
+$("run").addEventListener("click", run);
+
+addBatch("dup-A", "4, 4\n4, 4\n7, 4\n4, 7");
+addBatch("dup-B", "4, 4\n9, 9\n9, -100\n4, 9");
+loadSamples();
+</script>
+</body>
+</html>

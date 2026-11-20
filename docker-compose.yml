@@ -1,0 +1,12 @@
+services:
+  verifier:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: shared-embedding-verifier:latest
+    container_name: shared-embedding-verifier
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
